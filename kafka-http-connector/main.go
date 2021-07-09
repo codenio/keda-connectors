@@ -31,6 +31,7 @@ import (
 type kafkaMetadata struct {
 	bootstrapServers []string
 	consumerGroup    string
+	offsetResetPolicy string
 
 	// auth
 	saslType string
@@ -75,6 +76,19 @@ func parseKafkaMetadata(logger *zap.Logger) (kafkaMetadata, error) {
 	}
 	meta.consumerGroup = os.Getenv("CONSUMER_GROUP")
 
+	offsetResetPolicy := os.Getenv("OFFSET_RESET_POLICY")
+
+	// If offsetResetPolicy is not set, use latest by default
+	if offsetResetPolicy == ""  {
+		offsetResetPolicy = "latest"
+	}
+
+	// Check offsetResetPolicy is valid
+	if offsetResetPolicy != "earliest" && offsetResetPolicy != "latest" {
+		return meta, errors.Errorf("offsetResetPolicy %s not support. It should be one of earliest or latest", offsetResetPolicy)
+	}
+	meta.offsetResetPolicy = offsetResetPolicy
+
 	meta.InsecureSkipVerify = true
 	if os.Getenv("TLS_INSECURE_SKIP_VERIFY") == "false" {
 		meta.InsecureSkipVerify = false
@@ -103,19 +117,19 @@ func parseKafkaMetadata(logger *zap.Logger) (kafkaMetadata, error) {
 	}
 
 	if meta.tls == "enable" {
-		if os.Getenv("CA") == "" {
-			return meta, errors.New("no ca given")
+		// if either CERT or KEY are provided, both must be provided
+		if os.Getenv("CERT") != "" && os.Getenv("KEY") == "" {
+			return meta, errors.New("cert given but no key, both required")
 		}
+
+		if os.Getenv("KEY") != "" && os.Getenv("CERT") == "" {
+			return meta, errors.New("key given but no cert, both required")
+		}
+
+		// CA is optional
 		meta.ca = os.Getenv("CA")
-
-		if os.Getenv("CERT") == "" {
-			return meta, errors.New("no cert given")
-		}
+		// CERT and KEY must be provided as a pair, but both are optional
 		meta.cert = os.Getenv("CERT")
-
-		if os.Getenv("KEY") == "" {
-			return meta, errors.New("no key given")
-		}
 		meta.key = os.Getenv("KEY")
 	}
 
@@ -127,6 +141,16 @@ func parseKafkaMetadata(logger *zap.Logger) (kafkaMetadata, error) {
 func getConfig(metadata kafkaMetadata) (*sarama.Config, error) {
 	config := sarama.NewConfig()
 	config.Version = sarama.V2_0_0_0
+
+	// When offsetResetPolicy is earliest, set Consumer.Offsets.Initial to OffsetOldest.
+	// Otherwise, set Consumer.Offsets.Initial to OffsetNewest.
+	// Ref: https://github.com/Shopify/sarama/issues/803#issuecomment-269215508
+	if metadata.offsetResetPolicy == "earliest" {
+		config.Consumer.Offsets.Initial = sarama.OffsetOldest
+	} else {
+		config.Consumer.Offsets.Initial = sarama.OffsetNewest
+	}
+
 	if ok := metadata.saslType == kafkaAuthModeSaslPlaintext || metadata.saslType == kafkaAuthModeSaslScramSha256 || metadata.saslType == kafkaAuthModeSaslScramSha512; ok {
 		config.Net.SASL.Enable = true
 		config.Net.SASL.User = metadata.username
